@@ -7,10 +7,22 @@ import (
 	"strings"
 )
 
-// RunRipgrep executes the ripgrep command with the given pattern and directories.
+type Ripgrep struct {
+	Pattern string
+	Dirs    []string
+}
+
+func FindRipgrep() (string, error) {
+	rgPath, err := exec.LookPath("rg")
+	if err != nil {
+		return "", err 
+	}
+	return rgPath, nil
+}
+
 func RunRipgrep(rgPath, pattern string, dirs []string) ([]string, error) {
 	if pattern == "" {
-		return []string{}, nil // No pattern, no results
+		return []string{}, nil 
 	}
 
 	args := []string{"--color", "never", "--line-number", "--no-heading", pattern}
@@ -23,10 +35,8 @@ func RunRipgrep(rgPath, pattern string, dirs []string) ([]string, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
-	// Ripgrep exits with 1 if no matches are found, which is not an error for us.
-	// It exits with 2 for actual errors.
 	if err != nil && cmd.ProcessState.ExitCode() != 1 {
-		return nil, err // Return actual errors
+		return nil, err 
 	}
 
 	var results []string
