@@ -1,0 +1,3 @@
+ripgrep_path: "rg" # Default: assumes rg is in PATH
+search_dirs:
+  - "." # Default search directory
