@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -10,10 +11,11 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/data/binding"
+
 	"fyne.io/fyne/v2/widget"
 	"github.com/C0d3-5t3w/go-fzf/int/config"
 	"github.com/C0d3-5t3w/go-fzf/int/ripgrep"
-	"github.com/C0d3-5t3w/go-fzf/int/storage" // Import storage package
+	"github.com/C0d3-5t3w/go-fzf/int/storage"
 )
 
 // GUI represents the application's graphical user interface.
@@ -21,10 +23,11 @@ type GUI struct {
 	App     fyne.App
 	Window  fyne.Window
 	Config  *config.Config
-	Storage *storage.Storage // Add storage field
+	Storage *storage.Storage
 
 	searchInput *widget.Entry
 	resultsList *widget.List
+	statusBar   *widget.Label
 
 	// Data binding for results
 	resultsData binding.StringList
@@ -36,7 +39,7 @@ type GUI struct {
 }
 
 // NewGUI creates and initializes a new GUI instance.
-func NewGUI(cfg *config.Config, store *storage.Storage) *GUI { // Add storage parameter
+func NewGUI(cfg *config.Config, store *storage.Storage) *GUI {
 	a := app.New()
 	w := a.NewWindow("Go-FZF Ripgrep Interface")
 
@@ -44,16 +47,16 @@ func NewGUI(cfg *config.Config, store *storage.Storage) *GUI { // Add storage pa
 		App:         a,
 		Window:      w,
 		Config:      cfg,
-		Storage:     store, // Assign storage
+		Storage:     store,
 		resultsData: binding.NewStringList(),
-		debounceDur: 300 * time.Millisecond, // Debounce duration
+		debounceDur: 300 * time.Millisecond,
+		statusBar:   widget.NewLabel("Ready."),
 	}
 
 	// Load history before setting up widgets that might use it
 	err := gui.Storage.LoadHistory()
 	if err != nil {
 		log.Printf("Warning: Failed to load search history: %v", err)
-		// Non-fatal, continue with empty history
 	}
 
 	gui.setupWidgets()
@@ -100,37 +103,65 @@ func (g *GUI) setupWidgets() {
 		g.searchMutex.Unlock()
 	}
 
+	// Handle Enter key press for immediate search
+	g.searchInput.OnSubmitted = func(text string) {
+		g.searchMutex.Lock()
+		// Cancel any pending debounced search
+		if g.searchTimer != nil {
+			g.searchTimer.Stop()
+			g.searchTimer = nil
+		}
+		g.searchMutex.Unlock()
+		// Perform search immediately
+		g.performSearch(text)
+	}
+
 	g.resultsList.OnSelected = func(id widget.ListItemID) {
 		selectedItem, err := g.resultsData.GetValue(id)
 		if err != nil {
 			log.Printf("Error getting selected item: %v", err)
+			g.statusBar.SetText(fmt.Sprintf("Error getting selection: %v", err))
 			return
 		}
-		// Example action: Log the selected item
-		log.Printf("Selected: %s", selectedItem)
-		// Potentially open the file/line in an editor here
-		// For now, just clear selection and focus input
+
+		// Attempt to copy to clipboard using Window's clipboard
+		clipboard := g.Window.Clipboard() // Corrected: Use g.Window
+		if clipboard != nil {
+			clipboard.SetContent(selectedItem)
+			g.statusBar.SetText(fmt.Sprintf("Copied: %s", selectedItem))
+		} else {
+			// This case should be rare unless running in a very restricted environment
+			log.Printf("Selected (clipboard not available): %s", selectedItem)
+			g.statusBar.SetText(fmt.Sprintf("Selected: %s (clipboard N/A)", selectedItem))
+		}
+
+		// Clear selection and focus input for next search
 		g.resultsList.Unselect(id)
 		g.Window.Canvas().Focus(g.searchInput)
 	}
 }
 
 func (g *GUI) createContent() fyne.CanvasObject {
-	return container.NewBorder(g.searchInput, nil, nil, nil, g.resultsList)
+	// Add padding around the list and include the status bar
+	paddedList := container.NewPadded(g.resultsList)
+	return container.NewBorder(g.searchInput, g.statusBar, nil, nil, paddedList)
 }
 
 // performSearch runs ripgrep and updates the results list.
 func (g *GUI) performSearch(pattern string) {
 	trimmedPattern := strings.TrimSpace(pattern)
+
+	// Update status immediately
 	if trimmedPattern == "" {
-		g.resultsData.Set([]string{}) // Clear results if input is empty
+		g.resultsData.Set([]string{})
+		g.statusBar.SetText("Ready. Enter a search pattern.")
 		return
 	}
+	g.statusBar.SetText(fmt.Sprintf("Searching for '%s'...", trimmedPattern))
 
 	// Add to history and save *before* starting the async search
-	// to capture the intent immediately.
 	g.Storage.AddSearchTerm(trimmedPattern)
-	go func() { // Save history asynchronously to avoid blocking UI slightly
+	go func() {
 		err := g.Storage.SaveHistory()
 		if err != nil {
 			log.Printf("Error saving search history: %v", err)
@@ -142,23 +173,29 @@ func (g *GUI) performSearch(pattern string) {
 		results, err := ripgrep.RunRipgrep(g.Config.RipgrepPath, p, g.Config.SearchDirs)
 		if err != nil {
 			log.Printf("Error running ripgrep: %v", err)
-			// Optionally display error to the user via a status bar or dialog
 			fyne.CurrentApp().SendNotification(&fyne.Notification{
 				Title:   "Ripgrep Error",
 				Content: err.Error(),
 			})
-			g.resultsData.Set([]string{"Error running search..."}) // Show error in list
+			g.resultsData.Set([]string{"Error running search..."})
+			g.statusBar.SetText(fmt.Sprintf("Error: %v", err))
 			return
 		}
 
+		var statusText string
 		if len(results) == 0 {
 			results = []string{"No matches found."}
+			statusText = fmt.Sprintf("No matches found for '%s'", p)
+		} else {
+			statusText = fmt.Sprintf("Found %d match(es) for '%s'", len(results), p)
 		}
 
-		// Update the results data binding (must be done on main thread implicitly by Fyne)
 		err = g.resultsData.Set(results)
 		if err != nil {
 			log.Printf("Error setting results data: %v", err)
+			g.statusBar.SetText(fmt.Sprintf("Error updating results: %v", err))
+		} else {
+			g.statusBar.SetText(statusText)
 		}
 	}(trimmedPattern)
 }
